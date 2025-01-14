@@ -1,6 +1,7 @@
-import React, { Fragment, memo, useCallback, useMemo, useState } from 'react';
+import React, { Fragment, memo, useCallback, useEffect, useMemo, useState } from 'react';
 
 import classNames from 'clsx';
+import _ from 'lodash';
 import InfiniteScroll from 'react-infinite-scroll-component';
 
 import { SyncSpinner } from 'app/atoms';
@@ -10,9 +11,12 @@ import { ReactComponent as LayersIcon } from 'app/icons/layers.svg';
 import { ManageAssetsButton } from 'app/pages/ManageAssets/ManageAssetsButton';
 import { ComponentTheme } from 'app/types/appTheme.types';
 import { T } from 'lib/i18n/react';
-import { useAccount } from 'lib/temple/front';
+import { useAccount, useChainId } from 'lib/temple/front';
 import { UserHistoryItem } from 'lib/temple/history';
+import { fetchUserOperationByHash } from 'lib/temple/history/fetch';
+import { createOpParams } from 'lib/temple/history/filterParams';
 import { HistoryItemOpTypeEnum } from 'lib/temple/history/types';
+import { isKnownChainId } from 'lib/temple/types';
 
 import useHistory from '../../../lib/temple/history/hook';
 import {
@@ -28,7 +32,6 @@ import { SortButton, SortListItemType, SortPopup, SortPopupContent } from '../So
 import styles from './history.module.css';
 import { HistoryDetailsPopup } from './HistoryDetailsPopup';
 import { HistoryItem } from './HistoryItem';
-// import { txMocked, StakedMock } from './mock';
 
 const INITIAL_NUMBER = 30;
 const LOAD_STEP = 30;
@@ -44,8 +47,6 @@ interface Props {
   scrollableTarget?: string;
 }
 
-// const userHistory = [StakedMock];
-
 export const HistoryComponent: React.FC<Props> = memo(
   ({
     assetSlug,
@@ -56,19 +57,30 @@ export const HistoryComponent: React.FC<Props> = memo(
     scrollableTarget
   }) => {
     const { popup } = useAppEnv();
-    const { loading, reachedTheEnd, list: userHistory, loadMore } = useHistory(INITIAL_NUMBER, assetSlug);
-
     const { publicKeyHash: accountAddress } = useAccount();
+    const chainId = useChainId();
 
-    // useLoadPartnersPromo();
-
-    // sort
+    // factory method to create params object for api calls
+    const paramsRecord = useMemo(() => createOpParams(accountAddress), [accountAddress]);
+    // sort [0, 1, 2]
     const [filterOptions, setFilterOptions] = useState<HistoryItemOpTypeEnum[]>([]);
 
-    // Sort popup options
+    const historyFilterParams = useMemo(
+      () =>
+        filterOptions.reduce((acc, item) => {
+          acc = { ...acc, ...paramsRecord[item] };
+          return acc;
+        }, {}),
+      [filterOptions, paramsRecord]
+    );
+
+    console.log(historyFilterParams, 'historyFilterParams');
+
+    // Sort popup options (used only for ui sort)
     // in this case we will filter history by selected option
     // the filter option array looks like this -> [0, 3, 5, 7] etc.
     // it filters history based on type
+
     const memoizedSortAssetsOptions: SortListItemType[] = useMemo(
       () => [
         {
@@ -179,20 +191,84 @@ export const HistoryComponent: React.FC<Props> = memo(
       [filterOptions]
     );
 
-    // search
+    const {
+      loading: userHistoryLoading,
+      reachedTheEnd,
+      list: userHistory,
+      loadMore
+    } = useHistory(INITIAL_NUMBER, assetSlug, historyFilterParams);
+
+    // useLoadPartnersPromo();
+
+    const [filteredHistory, setFilteredHistory] = useState<UserHistoryItem[]>([]);
+    const [isSearchingByHash, setIsSearchingByHash] = useState(false);
+
+    const loading = userHistoryLoading || isSearchingByHash;
+
+    // debounced search ****************************************************
     const [searchValue, setSearchValue] = useState('');
-    // const [searchFocused, setSearchFocused] = useState(false);
+    // using debounce set new name after 450 ms to filter estates data
+    const [searchValueForFilter, setSearchValueForFilter] = useState('');
 
-    // popup
-    const [isOpen, setIsOpen] = useState(false);
-    const [activeHistoryItem, setActiveHistoryItem] = useState<UserHistoryItem | null>(null);
+    const sendRequest = useCallback((hash: string) => {
+      setSearchValueForFilter(hash);
+    }, []);
 
-    const filteredBySearchHistory = useMemo(
-      () => (userHistory ? userHistory.filter(op => op.hash.includes(searchValue)) : []),
-      [searchValue, userHistory]
+    const clearInput = useCallback(() => {
+      setSearchValue('');
+      sendRequest('');
+    }, [sendRequest]);
+
+    // debounced diltering when srching estate by name
+    const handleDebouncedSearch = useMemo(() => {
+      return _.debounce(sendRequest, 450);
+    }, [sendRequest]);
+
+    useEffect(() => {
+      return () => {
+        handleDebouncedSearch.cancel();
+      };
+    }, [handleDebouncedSearch]);
+
+    const onChange = useCallback(
+      (value: string) => {
+        // state is updated on every value change, so input will work
+        setSearchValue(value);
+
+        // call debounced request here
+        handleDebouncedSearch(value);
+      },
+      [handleDebouncedSearch]
     );
 
-    const filteredHistory = filterTransactionHistory(filteredBySearchHistory, filterOptions);
+    // end of debounced search ****************************************************
+
+    // fetch single user operation by entered search value
+    useEffect(() => {
+      async function fetchOperationData() {
+        setIsSearchingByHash(true);
+        if (chainId && isKnownChainId(chainId) && searchValueForFilter !== '') {
+          try {
+            const arr = await fetchUserOperationByHash(chainId, accountAddress, searchValueForFilter);
+            setIsSearchingByHash(false);
+
+            setFilteredHistory(arr);
+          } catch (e) {
+            console.log(e);
+            setFilteredHistory([]);
+            setIsSearchingByHash(false);
+          }
+        } else {
+          setIsSearchingByHash(false);
+        }
+      }
+
+      fetchOperationData();
+    }, [searchValueForFilter, chainId, accountAddress]);
+
+    // popup states
+    const [isOpen, setIsOpen] = useState(false);
+    const [activeHistoryItem, setActiveHistoryItem] = useState<UserHistoryItem | null>(null);
 
     const handleRequestClose = useCallback(() => {
       setIsOpen(false);
@@ -201,20 +277,28 @@ export const HistoryComponent: React.FC<Props> = memo(
     const handleItemClick = useCallback(
       (hash: string) => {
         setIsOpen(true);
-
-        setActiveHistoryItem(filteredHistory.find(item => item.hash === hash) ?? null);
+        const activeHistory = searchValue.length > 0 ? filteredHistory : userHistory;
+        setActiveHistoryItem(activeHistory.find(item => item.hash === hash) ?? null);
       },
-      [filteredHistory]
+      [filteredHistory, searchValue.length, userHistory]
     );
 
     const retryInitialLoad = () => loadMore(INITIAL_NUMBER);
     const loadMoreActivities = () => loadMore(LOAD_STEP);
 
-    const loadNext = userHistory.length === 0 ? retryInitialLoad : loadMoreActivities;
+    // check for searchValue to not load history if search is active
+    const loadNext =
+      searchValue.length !== 0 ? () => {} : userHistory.length === 0 ? retryInitialLoad : loadMoreActivities;
 
     const onScroll = loading || reachedTheEnd ? undefined : buildOnScroll(loadNext);
 
     const searchbtnStyles = useMemo(() => (theme === DARK_LIGHT_THEME ? cleanBtnStyles : {}), [theme]);
+
+    const historyToshow = useMemo(
+      () => (searchValueForFilter.length !== 0 ? filteredHistory : userHistory),
+      [filteredHistory, searchValueForFilter.length, userHistory]
+    );
+
     return (
       <div className={classNames('w-full mx-auto h-full relative', popup ? 'max-w-sm' : 'max-w-screen-xxs')}>
         <div className={classNames('mt-3 w-full mx-4')}>
@@ -231,7 +315,8 @@ export const HistoryComponent: React.FC<Props> = memo(
                 >
                   <SearchExplorerFinder
                     value={searchValue}
-                    onValueChange={setSearchValue}
+                    onValueChange={onChange}
+                    cleanButtonCb={clearInput}
                     containerClassName="mr-2"
                     className={classNames(theme === DARK_LIGHT_THEME && styles.inputBgDarkLight)}
                     cleanButtonStyle={searchbtnStyles}
@@ -264,7 +349,7 @@ export const HistoryComponent: React.FC<Props> = memo(
           </SearchExplorer>
         </div>
 
-        {!filteredHistory.length && !loading ? (
+        {!historyToshow.length && !loading ? (
           <div
             className={classNames('h-full my-auto py-16', 'flex flex-col items-center justify-center', 'text-white')}
           >
@@ -289,7 +374,7 @@ export const HistoryComponent: React.FC<Props> = memo(
                 </div>
               }
             >
-              {filteredHistory.map(historyItem => (
+              {historyToshow.map(historyItem => (
                 <Fragment key={historyItem.hash}>
                   <HistoryItem
                     address={accountAddress}

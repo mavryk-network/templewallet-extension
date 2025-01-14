@@ -79,6 +79,27 @@ type GetOperationsBaseParams = {
   [key in `initiator${'' | '.ne'}`]?: string;
 };
 
+export const fetchGetAccountOperationByHash = async (
+  chainId: TzktApiChainId,
+  accountAddress: string,
+  hash: string | undefined
+) => {
+  try {
+    if (!hash) {
+      throw new Error('No transaction hash is provided!');
+    }
+    // fetching operation from /operations, cuz parameter filter doesnt work on account operations
+    // example -> /accounts/{address}/operation?parameter.hash={hash} -> wont work
+    const [operation] = await fetchGetOperationsByHash(chainId, hash);
+
+    return fetchGet<TzktOperation[]>(chainId, `/accounts/${accountAddress}/operations`, {
+      level: operation.level
+    });
+  } catch (e) {
+    throw new Error("Can't fetch transaction by hash");
+  }
+};
+
 export const fetchGetAccountOperations = (
   chainId: TzktApiChainId,
   accountAddress: string,
@@ -102,7 +123,7 @@ export const fetchGetOperationsByHash = (
   } = {}
 ) => fetchGet<TzktOperation[]>(chainId, `/operations/${hash}`, params);
 
-type GetOperationsTransactionsParams = GetOperationsBaseParams & {
+export type GetOperationsTransactionsParams = GetOperationsBaseParams & {
   [key in `anyof.sender.target${'' | '.initiator'}`]?: string;
 } & {
   [key in `amount${'' | '.ne'}`]?: string;
